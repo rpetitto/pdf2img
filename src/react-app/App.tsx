@@ -4,49 +4,37 @@ import "./App.css";
 function App() {
   const [pdfUrl, setPdfUrl] = useState("");
   const [imageUrl, setImageUrl] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  async function handleConvert(e: React.FormEvent) {
+  function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    setError(null);
-    setImageUrl(null);
+    if (!pdfUrl) return;
+    const target = `${window.location.origin}/${pdfUrl}`;
+    setImageUrl(target);
     setLoading(true);
-    try {
-      const res = await fetch("/api/convert", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: pdfUrl }),
-      });
-      const data = (await res.json()) as { imageUrl?: string; error?: string };
-      if (!res.ok || !data.imageUrl) {
-        setError(data.error ?? `Request failed (${res.status})`);
-      } else {
-        setImageUrl(data.imageUrl);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Request failed");
-    } finally {
-      setLoading(false);
-    }
   }
 
   return (
     <div className="app">
       <h1>pdf2img</h1>
       <p>
-        Free API: POST a PDF URL, get back a single PNG. Multi-page PDFs are
-        stitched vertically at their original page width.
+        Free Cloudinary-style PDF → image API. Append any PDF URL to this
+        origin and you get back a single PNG. Multi-page PDFs are stitched
+        vertically at their original page width.
       </p>
 
-      <pre className="snippet">{`POST /api/convert
-Content-Type: application/json
+      <pre className="snippet">{`GET https://pdf2img.flingit.run/<pdf_url>
 
-{ "url": "https://example.com/file.pdf" }
+Example:
+  https://pdf2img.flingit.run/https://example.com/file.pdf
 
-→ { "imageUrl": "https://.../api/image/<id>.png" }`}</pre>
+→ image/png (cached after first render)`}</pre>
 
-      <form onSubmit={handleConvert} className="form">
+      <p style={{ marginTop: "1.5rem" }}>
+        Try it: paste a PDF URL.
+      </p>
+
+      <form onSubmit={handleSubmit} className="form">
         <input
           type="url"
           required
@@ -54,12 +42,9 @@ Content-Type: application/json
           value={pdfUrl}
           onChange={(e) => setPdfUrl(e.target.value)}
         />
-        <button type="submit" disabled={loading}>
-          {loading ? "Converting..." : "Convert"}
-        </button>
+        <button type="submit">Render</button>
       </form>
 
-      {error && <p className="error">Error: {error}</p>}
       {imageUrl && (
         <div className="result">
           <p>
@@ -67,9 +52,20 @@ Content-Type: application/json
               {imageUrl}
             </a>
           </p>
-          <img src={imageUrl} alt="Converted PDF" />
+          {loading && <p>Loading…</p>}
+          <img
+            src={imageUrl}
+            alt="Rendered PDF"
+            onLoad={() => setLoading(false)}
+            onError={() => setLoading(false)}
+          />
         </div>
       )}
+
+      <p className="footnote">
+        Also available as JSON: <code>POST /api/convert</code> with{" "}
+        <code>{`{ "url": "..." }`}</code> returns <code>{`{ "imageUrl": "..." }`}</code>.
+      </p>
 
       <a
         href="https://flingit.io"

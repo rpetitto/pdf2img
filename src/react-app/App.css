@@ -54,6 +54,20 @@ h1 {
   color: #c00;
 }
 
+.footnote {
+  margin-top: 2rem;
+  color: #666;
+  font-size: 0.85rem;
+}
+
+.footnote code {
+  background: #f4f4f4;
+  padding: 0.1rem 0.3rem;
+  border-radius: 3px;
+  font-family: ui-monospace, monospace;
+  font-size: 0.85rem;
+}
+
 .result img {
   max-width: 100%;
   border: 1px solid #ddd;

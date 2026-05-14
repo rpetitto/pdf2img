@@ -2,81 +2,135 @@ import { app, storage } from "flingit";
 import "./mupdf-init";
 import * as mupdf from "mupdf";
 
+type HonoContext = Parameters<Parameters<typeof app.get>[1]>[0];
+
+const PNG_CACHE_HEADERS = {
+  "Content-Type": "image/png",
+  "Cache-Control": "public, max-age=31536000, immutable",
+};
+
 function randomId(): string {
   const bytes = new Uint8Array(12);
   crypto.getRandomValues(bytes);
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-function getOrigin(c: { req: { url: string; header: (k: string) => string | undefined } }): string {
-  const forwardedHost = c.req.header("x-forwarded-host");
-  const forwardedProto = c.req.header("x-forwarded-proto");
-  if (forwardedHost) {
-    return `${forwardedProto ?? "https"}://${forwardedHost}`;
-  }
-  const url = new URL(c.req.url);
-  return `${url.protocol}//${url.host}`;
+async function sha256Hex(input: string): Promise<string> {
+  const data = new TextEncoder().encode(input);
+  const hash = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(hash), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-app.post("/api/convert", async (c) => {
+function parsePdfUrl(raw: string): URL | null {
+  let candidate = raw;
+  try {
+    candidate = decodeURIComponent(raw);
+  } catch {
+    // fall through with raw
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(candidate);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+  return parsed;
+}
+
+async function fetchAndRender(pdfUrl: string): Promise<{ pdf: Uint8Array; png: Uint8Array }> {
+  const pdfResp = await fetch(pdfUrl);
+  if (!pdfResp.ok) {
+    throw new Error(`Failed to fetch PDF: HTTP ${pdfResp.status}`);
+  }
+  const pdf = new Uint8Array(await pdfResp.arrayBuffer());
+  const png = renderPdfToStackedPng(pdf);
+  return { pdf, png };
+}
+
+async function getOrCreateCachedPng(pdfUrl: string): Promise<Uint8Array> {
+  const hash = await sha256Hex(pdfUrl);
+  const pngKey = `images/by-url/${hash}.png`;
+  const pdfKey = `pdfs/by-url/${hash}.pdf`;
+
+  const existing = await storage.get(pngKey);
+  if (existing) {
+    return new Uint8Array(await existing.arrayBuffer());
+  }
+
+  const { pdf, png } = await fetchAndRender(pdfUrl);
+  await storage.put(pdfKey, pdf, { contentType: "application/pdf" });
+  await storage.put(pngKey, png, { contentType: "image/png" });
+  return png;
+}
+
+app.post("/api/convert", async (c: HonoContext) => {
   let body: { url?: string };
   try {
     body = await c.req.json();
   } catch {
     return c.json({ error: "Invalid JSON body" }, 400);
   }
-
-  const pdfUrl = body.url;
-  if (!pdfUrl || typeof pdfUrl !== "string") {
-    return c.json({ error: "Missing 'url' field" }, 400);
+  const parsed = body.url ? parsePdfUrl(body.url) : null;
+  if (!parsed) {
+    return c.json({ error: "Missing or invalid 'url' field (must be http/https)" }, 400);
   }
 
-  let parsedUrl: URL;
-  try {
-    parsedUrl = new URL(pdfUrl);
-  } catch {
-    return c.json({ error: "Invalid URL" }, 400);
+  const pdfBytes = await (async () => {
+    const r = await fetch(parsed.toString());
+    if (!r.ok) return null;
+    return new Uint8Array(await r.arrayBuffer());
+  })();
+  if (!pdfBytes) {
+    return c.json({ error: "Failed to fetch PDF" }, 400);
   }
-  if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
-    return c.json({ error: "URL must be http or https" }, 400);
-  }
-
-  const pdfResp = await fetch(pdfUrl);
-  if (!pdfResp.ok) {
-    return c.json({ error: `Failed to fetch PDF: ${pdfResp.status}` }, 400);
-  }
-  const pdfBytes = new Uint8Array(await pdfResp.arrayBuffer());
 
   let pngBytes: Uint8Array;
   try {
     pngBytes = renderPdfToStackedPng(pdfBytes);
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    return c.json({ error: `PDF conversion failed: ${message}` }, 400);
+    return c.json({ error: `PDF conversion failed: ${err instanceof Error ? err.message : "Unknown error"}` }, 400);
   }
 
   const id = randomId();
   await storage.put(`pdfs/${id}.pdf`, pdfBytes, { contentType: "application/pdf" });
   await storage.put(`images/${id}.png`, pngBytes, { contentType: "image/png" });
 
-  const imageUrl = `${getOrigin(c)}/api/image/${id}.png`;
-  return c.json({ imageUrl });
+  const origin = new URL(c.req.url).origin;
+  return c.json({ imageUrl: `${origin}/api/image/${id}.png` });
 });
 
-app.get("/api/image/:filename", async (c) => {
+app.get("/api/image/:filename", async (c: HonoContext) => {
   const filename = c.req.param("filename");
-  if (!/^[a-f0-9]+\.png$/.test(filename)) {
-    return c.text("Not found", 404);
-  }
+  if (!/^[a-f0-9]+\.png$/.test(filename)) return c.text("Not found", 404);
   const file = await storage.get(`images/${filename}`);
   if (!file) return c.text("Not found", 404);
   const buffer = await file.arrayBuffer();
-  return new Response(buffer, {
-    headers: {
-      "Content-Type": "image/png",
-      "Cache-Control": "public, max-age=31536000, immutable",
-    },
-  });
+  return new Response(buffer, { headers: PNG_CACHE_HEADERS });
+});
+
+// Cloudinary-style URL: GET /<pdf_url>
+// Example: https://pdf2img.flingit.run/https://example.com/file.pdf
+// Returns the stitched PNG bytes directly.
+app.get("/:rest{.+}", async (c: HonoContext) => {
+  const url = new URL(c.req.url);
+  // Reconstruct everything after the leading "/" including query string,
+  // so URLs with their own query params survive (e.g. signed S3 URLs).
+  const after = url.pathname.slice(1) + url.search;
+
+  const parsed = parsePdfUrl(after);
+  if (!parsed) {
+    // Not a PDF URL request — fall through to the static asset handler.
+    return c.notFound();
+  }
+
+  try {
+    const png = await getOrCreateCachedPng(parsed.toString());
+    return new Response(png, { headers: PNG_CACHE_HEADERS });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Conversion failed";
+    return c.text(message, 400);
+  }
 });
 
 function renderPdfToStackedPng(pdfBytes: Uint8Array): Uint8Array {
