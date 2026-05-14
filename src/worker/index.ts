@@ -28,6 +28,12 @@ function parsePdfUrl(raw: string): URL | null {
   } catch {
     // fall through with raw
   }
+  // Some image proxies (e.g. Cloudinary's f_auto fetch used by Glide) append
+  // a trailing "/" to the fetched URL. A PDF URL never legitimately ends in
+  // "/", so strip it before resolving.
+  if (candidate.endsWith("/") && /\.[a-zA-Z0-9]{1,8}\/$/.test(candidate)) {
+    candidate = candidate.slice(0, -1);
+  }
   let parsed: URL;
   try {
     parsed = new URL(candidate);
